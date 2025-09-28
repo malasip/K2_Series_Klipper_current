@@ -41,4 +41,6 @@ sendf_info(void)
     sendf("resault_prtouch_step_cnt oid=%c cnt_x=%i cnt_y=%i cnt_z=%i", 1, 0, 0, 0);
 
     sendf("resault_prtouch_apax oid=%c ch=%c len=%c ticks=%.*s datas=%.*s espds=%.*s", 1, 0, 0, "creality", "creality", "creality");
+
+    sendf("resault_prtouch_pres oid=%c tri_chxs=%c buf_len=%c ch=%c idx=%c len=%c ticks=%.*s datas=%.*s", 1, 0, 0, 0, 1, 1, "creality", "creality");
 }
