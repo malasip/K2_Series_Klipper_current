@@ -122,15 +122,6 @@ timer_kick(void)
     timer_settime(TimerInfo.t_alarm, TIMER_ABSTIME, &it, NULL);
 }
 
-// Implement simple early-boot delay mechanism
-void
-udelay(uint32_t usecs)
-{
-    uint32_t end = timer_read_time() + timer_from_us(usecs);
-    while (timer_is_before(timer_read_time(), end))
-        ;
-}
-
 #define TIMER_IDLE_REPEAT_COUNT 100
 #define TIMER_REPEAT_COUNT 20
 
@@ -161,7 +152,7 @@ timer_dispatch(void)
             // Check if there are too many repeat timers
             if (diff < (int32_t)(-timer_from_us(100000)))
                 try_shutdown("Rescheduled timer in the past");
-            if (sched_tasks_busy())
+            if (sched_check_set_tasks_busy())
                 return;
             repeat_count = TIMER_IDLE_REPEAT_COUNT;
         }

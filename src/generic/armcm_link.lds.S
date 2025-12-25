@@ -22,10 +22,6 @@ SECTIONS
         _text_vectortable_start = .;
         KEEP(*(.vector_table))
         _text_vectortable_end = .;
-#if CONFIG_BOARD_INFO_CONFIGURE
-        . = _text_vectortable_start + 0x200;
-        KEEP(*(SV_SECTION))
-#endif
         *(.text .text.*)
         *(.rodata .rodata*)
     } > rom
@@ -73,5 +69,8 @@ SECTIONS
         // that isn't needed so no need to include them in the binary.
         *(.init)
         *(.fini)
+        // Don't include exception tables
+        *(.ARM.extab)
+        *(.ARM.exidx)
     }
 }

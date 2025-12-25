@@ -18,7 +18,6 @@ class PrinterHeaterFan:
         self.fan = fan.Fan(config, default_shutdown_speed=1.)
         self.fan_speed = config.getfloat("fan_speed", 1., minval=0., maxval=1.)
         self.last_speed = 0.
-        self.is_ptc_fan = config.getint("is_ptc_fan", 0)
     def handle_ready(self):
         pheaters = self.printer.lookup_object('heaters')
         self.heaters = [pheaters.lookup_heater(n) for n in self.heater_names]
@@ -32,22 +31,9 @@ class PrinterHeaterFan:
             current_temp, target_temp = heater.get_temp(eventtime)
             if target_temp or current_temp > self.heater_temp:
                 speed = self.fan_speed
-        # PTC加热风扇和PTC加热器同步 加热时开启 不加热时进行关闭
-        chamber_heater = self.printer.lookup_object("heater_generic chamber_heater", None)
-        heater_bed_state = self.printer.lookup_object('heater_bed').heater_bed_state
-        if self.is_ptc_fan==1 and target_temp > 40 and chamber_heater:
-            if hasattr(chamber_heater.control, "max_delta"):
-                if chamber_heater.last_pwm_value==0:
-                    speed = 0
-                else:
-                    speed = 0.3
-                if chamber_heater.control.count!=20:
-                    speed = 0
         if speed != self.last_speed:
             self.last_speed = speed
-            curtime = self.printer.get_reactor().monotonic()
-            print_time = self.fan.get_mcu().estimated_print_time(curtime)
-            self.fan.set_speed(print_time + PIN_MIN_TIME, speed)
+            self.fan.set_speed(speed)
         return eventtime + 1.
 
 def load_config_prefix(config):

@@ -6,148 +6,18 @@
 
 #include <math.h> // sqrt
 #include <stddef.h> // offsetof
-#include <stdio.h> // printf
 #include <stdlib.h> // malloc
 #include <string.h> // memset
 #include "compiler.h" // unlikely
 #include "trapq.h" // move_get_coord
 
 // Allocate a new 'move' object
-typedef int bool;
-#define true 1
-#define false 0
-
-
 struct move *
 move_alloc(void)
 {
     struct move *m = malloc(sizeof(*m));
     memset(m, 0, sizeof(*m));
     return m;
-}
-
-typedef struct _move_data_t_in_trapq_ {
-    double start_pos[4];
-    double end_pos[4];
-    // ????
-    double start_v;
-    double cruise_v;
-    double end_v;
-    double accel_t;
-    double cruise_t;
-    double decel_t;
-
-    double accel;
-    double junction_deviation;
-    bool is_kinematic_move;
-    double axes_d[4];
-    double move_d;
-    double axes_r[4];
-    double min_move_t;
-    double max_start_v2;
-    double max_cruise_v2;
-    double delta_v2;
-    double max_smoothed_v2;
-    double smooth_delta_v2;
-    struct _move_data_t_in_trapq_* next;
-} move_data_t_in_trapq;
-
-append_return_t __visible
-trapq_append_from_moveq(struct trapq *tq_kinematic, struct trapq *tq_extruder,double next_move_time,unsigned int move_data_h,int move_num)
-{
-    // printf("get move head addr 0x%x\n",(unsigned int)move_data_h);
-    move_data_t_in_trapq *move_data = NULL;
-    double next_move_time_ = next_move_time;
-    double extru_last_position=999999999.999;
-    append_return_t return_value;
-    int i = 0;
-    for (move_data = (move_data_t_in_trapq*)move_data_h; move_data != NULL;move_data = move_data->next) { // for each move in move_data_h
-        if (move_data->is_kinematic_move) {
-            trapq_append(tq_kinematic, next_move_time_, move_data->accel_t, move_data->cruise_t,
-                        move_data->decel_t, move_data->start_pos[0],
-                        move_data->start_pos[1], move_data->start_pos[2],
-                        move_data->axes_r[0], move_data->axes_r[1],
-                        move_data->axes_r[2], move_data->start_v,
-                        move_data->cruise_v, move_data->accel);
-        }
-
-        if(move_data->axes_d[3]!=0){
-            double axis_r = (double)move_data->axes_r[3];
-            double accel = move_data->accel * axis_r;
-            double start_v = move_data->start_v * axis_r;
-            double cruise_v = move_data->cruise_v * axis_r;
-            bool can_pressure_advance = false;
-            if (axis_r > 0. && (move_data->axes_d[0] || move_data->axes_d[1]))
-                can_pressure_advance = true;
-            #if 0
-            if((move_data->start_pos[2] <2.0+0.2)&&(move_data->start_pos[2] > 2.0-0.2)){//layer 7,z=2.0
-                printf("layer 7,z=2.0,x:%f,y:%f,z:%f,move_d:%f,accel:%f,start_v:%f,cruise_v:%f,accel_t:%f,cruise_t:%f,decel_t:%f,can_pressure_advance:%d\n",move_data->start_pos[0],move_data->start_pos[1],move_data->start_pos[2],move_data->move_d,accel,start_v,cruise_v,move_data->accel_t,move_data->cruise_t,move_data->decel_t,can_pressure_advance);
-            }else if((move_data->start_pos[2] <9.75+0.2)&&(move_data->start_pos[2] > 9.75-0.2)){//layer 38,z=9.75))
-                printf("layer 38,z=9.75,x:%f,y:%f,z:%f,move_d:%f,accel:%f,start_v:%f,cruise_v:%f,accel_t:%f,cruise_t:%f,decel_t:%f,can_pressure_advance:%d\n",move_data->start_pos[0],move_data->start_pos[1],move_data->start_pos[2],move_data->move_d,accel,start_v,cruise_v,move_data->accel_t,move_data->cruise_t,move_data->decel_t,can_pressure_advance);
-            }
-            #endif
-            trapq_append(tq_extruder, next_move_time_,
-                        move_data->accel_t, move_data->cruise_t, move_data->decel_t,
-                        move_data->start_pos[3], 0., 0.,
-                        1., can_pressure_advance, 0.,
-                        start_v, cruise_v, accel);
-            extru_last_position = move_data->end_pos[3];
-        }
-        next_move_time_ = (next_move_time_ + move_data->accel_t + move_data->cruise_t + move_data->decel_t);
-        i++;
-        if (i == move_num)
-        break;
-    }
-    return_value.extru_last_position = extru_last_position;
-    return_value.next_move_time = next_move_time_;
-    return return_value;
-}
-// Fill and add a move to the trapezoid velocity queue
-void __visible
-trapq_append(struct trapq *tq, double print_time
-             , double accel_t, double cruise_t, double decel_t
-             , double start_pos_x, double start_pos_y, double start_pos_z
-             , double axes_r_x, double axes_r_y, double axes_r_z
-             , double start_v, double cruise_v, double accel)
-{
-    struct coord start_pos = { .x=start_pos_x, .y=start_pos_y, .z=start_pos_z };
-    struct coord axes_r = { .x=axes_r_x, .y=axes_r_y, .z=axes_r_z };
-    if (accel_t) {
-        struct move *m = move_alloc();
-        m->print_time = print_time;
-        m->move_t = accel_t;
-        m->start_v = start_v;
-        m->half_accel = .5 * accel;
-        m->start_pos = start_pos;
-        m->axes_r = axes_r;
-        trapq_add_move(tq, m);
-
-        print_time += accel_t;
-        start_pos = move_get_coord(m, accel_t);
-    }
-    if (cruise_t) {
-        struct move *m = move_alloc();
-        m->print_time = print_time;
-        m->move_t = cruise_t;
-        m->start_v = cruise_v;
-        m->half_accel = 0.;
-        m->start_pos = start_pos;
-        m->axes_r = axes_r;
-        trapq_add_move(tq, m);
-
-        print_time += cruise_t;
-        start_pos = move_get_coord(m, cruise_t);
-    }
-    if (decel_t) {
-        struct move *m = move_alloc();
-        m->print_time = print_time;
-        m->move_t = decel_t;
-        m->start_v = cruise_v;
-        m->half_accel = -.5 * accel;
-        m->start_pos = start_pos;
-        m->axes_r = axes_r;
-        trapq_add_move(tq, m);
-    }
 }
 
 // Return the distance moved given a time in a move
@@ -179,6 +49,7 @@ trapq_alloc(void)
     list_init(&tq->moves);
     list_init(&tq->history);
     struct move *head_sentinel = move_alloc(), *tail_sentinel = move_alloc();
+    head_sentinel->print_time = -1.0;
     tail_sentinel->print_time = tail_sentinel->move_t = NEVER_TIME;
     list_add_head(&head_sentinel->node, &tq->moves);
     list_add_tail(&tail_sentinel->node, &tq->moves);
@@ -233,7 +104,7 @@ trapq_add_move(struct trapq *tq, struct move *m)
         // Add a null move to fill time gap
         struct move *null_move = move_alloc();
         null_move->start_pos = m->start_pos;
-        if (!prev->print_time && m->print_time > MAX_NULL_MOVE)
+        if (prev->print_time <= 0. && m->print_time > MAX_NULL_MOVE)
             // Limit the first null move to improve numerical stability
             null_move->print_time = m->print_time - MAX_NULL_MOVE;
         else
@@ -245,11 +116,58 @@ trapq_add_move(struct trapq *tq, struct move *m)
     tail_sentinel->print_time = 0.;
 }
 
-#define HISTORY_EXPIRE (30.0)
+// Fill and add a move to the trapezoid velocity queue
+void __visible
+trapq_append(struct trapq *tq, double print_time
+             , double accel_t, double cruise_t, double decel_t
+             , double start_pos_x, double start_pos_y, double start_pos_z
+             , double axes_r_x, double axes_r_y, double axes_r_z
+             , double start_v, double cruise_v, double accel)
+{
+    struct coord start_pos = { .x=start_pos_x, .y=start_pos_y, .z=start_pos_z };
+    struct coord axes_r = { .x=axes_r_x, .y=axes_r_y, .z=axes_r_z };
+    if (accel_t) {
+        struct move *m = move_alloc();
+        m->print_time = print_time;
+        m->move_t = accel_t;
+        m->start_v = start_v;
+        m->half_accel = .5 * accel;
+        m->start_pos = start_pos;
+        m->axes_r = axes_r;
+        trapq_add_move(tq, m);
+
+        print_time += accel_t;
+        start_pos = move_get_coord(m, accel_t);
+    }
+    if (cruise_t) {
+        struct move *m = move_alloc();
+        m->print_time = print_time;
+        m->move_t = cruise_t;
+        m->start_v = cruise_v;
+        m->half_accel = 0.;
+        m->start_pos = start_pos;
+        m->axes_r = axes_r;
+        trapq_add_move(tq, m);
+
+        print_time += cruise_t;
+        start_pos = move_get_coord(m, cruise_t);
+    }
+    if (decel_t) {
+        struct move *m = move_alloc();
+        m->print_time = print_time;
+        m->move_t = decel_t;
+        m->start_v = cruise_v;
+        m->half_accel = -.5 * accel;
+        m->start_pos = start_pos;
+        m->axes_r = axes_r;
+        trapq_add_move(tq, m);
+    }
+}
 
 // Expire any moves older than `print_time` from the trapezoid velocity queue
 void __visible
-trapq_finalize_moves(struct trapq *tq, double print_time)
+trapq_finalize_moves(struct trapq *tq, double print_time
+                     , double clear_history_time)
 {
     struct move *head_sentinel = list_first_entry(&tq->moves, struct move,node);
     struct move *tail_sentinel = list_last_entry(&tq->moves, struct move, node);
@@ -272,10 +190,9 @@ trapq_finalize_moves(struct trapq *tq, double print_time)
     if (list_empty(&tq->history))
         return;
     struct move *latest = list_first_entry(&tq->history, struct move, node);
-    double expire_time = latest->print_time + latest->move_t - HISTORY_EXPIRE;
     for (;;) {
         struct move *m = list_last_entry(&tq->history, struct move, node);
-        if (m == latest || m->print_time + m->move_t > expire_time)
+        if (m == latest || m->print_time + m->move_t > clear_history_time)
             break;
         list_del(&m->node);
         free(m);
@@ -288,7 +205,7 @@ trapq_set_position(struct trapq *tq, double print_time
                    , double pos_x, double pos_y, double pos_z)
 {
     // Flush all moves from trapq
-    trapq_finalize_moves(tq, NEVER_TIME);
+    trapq_finalize_moves(tq, NEVER_TIME, 0);
 
     // Prune any moves in the trapq history that were interrupted
     while (!list_empty(&tq->history)) {
@@ -311,6 +228,22 @@ trapq_set_position(struct trapq *tq, double print_time
     list_add_head(&m->node, &tq->history);
 }
 
+// Copy the info in a 'struct move' to a 'struct pull_move'
+static void
+copy_pull_move(struct pull_move *p, struct move *m)
+{
+    p->print_time = m->print_time;
+    p->move_t = m->move_t;
+    p->start_v = m->start_v;
+    p->accel = 2. * m->half_accel;
+    p->start_x = m->start_pos.x;
+    p->start_y = m->start_pos.y;
+    p->start_z = m->start_pos.z;
+    p->x_r = m->axes_r.x;
+    p->y_r = m->axes_r.y;
+    p->z_r = m->axes_r.z;
+}
+
 // Return history of movement queue
 int __visible
 trapq_extract_old(struct trapq *tq, struct pull_move *p, int max
@@ -318,21 +251,21 @@ trapq_extract_old(struct trapq *tq, struct pull_move *p, int max
 {
     int res = 0;
     struct move *m;
+    list_for_each_entry_reverse(m, &tq->moves, node) {
+        if (start_time >= m->print_time + m->move_t || res >= max)
+            break;
+        if (end_time <= m->print_time || (!m->start_v && !m->half_accel))
+            continue;
+        copy_pull_move(p, m);
+        p++;
+        res++;
+    }
     list_for_each_entry(m, &tq->history, node) {
         if (start_time >= m->print_time + m->move_t || res >= max)
             break;
         if (end_time <= m->print_time)
             continue;
-        p->print_time = m->print_time;
-        p->move_t = m->move_t;
-        p->start_v = m->start_v;
-        p->accel = 2. * m->half_accel;
-        p->start_x = m->start_pos.x;
-        p->start_y = m->start_pos.y;
-        p->start_z = m->start_pos.z;
-        p->x_r = m->axes_r.x;
-        p->y_r = m->axes_r.y;
-        p->z_r = m->axes_r.z;
+        copy_pull_move(p, m);
         p++;
         res++;
     }

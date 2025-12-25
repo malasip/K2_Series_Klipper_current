@@ -1,6 +1,6 @@
 // Basic scheduling functions and startup/shutdown code.
 //
-// Copyright (C) 2016-2021  Kevin O'Connor <kevin@koconnor.net>
+// Copyright (C) 2016-2024  Kevin O'Connor <kevin@koconnor.net>
 //
 // This file may be distributed under the terms of the GNU GPLv3 license.
 
@@ -19,7 +19,7 @@ static struct timer periodic_timer, sentinel_timer, deleted_timer;
 
 static struct {
     struct timer *timer_list, *last_insert;
-    int8_t tasks_status;
+    int8_t tasks_status, tasks_busy;
     uint8_t shutdown_status, shutdown_reason;
 } SchedStatus = {.timer_list = &periodic_timer, .last_insert = &periodic_timer};
 
@@ -86,18 +86,12 @@ void
 sched_add_timer(struct timer *add)
 {
     uint32_t waketime = add->waketime;
-	uint8_t flags = 0;
     irqstatus_t flag = irq_save();
     struct timer *tl = SchedStatus.timer_list;
     if (unlikely(timer_is_before(waketime, tl->waketime))) {
         // This timer is before all other scheduled timers
         if (timer_is_before(waketime, timer_read_time()))
-		{
-            //try_shutdown("Timer too close");
-			flags = 1;
-			waketime = timer_read_time() + timer_from_us(2);
-			add->waketime = waketime;
-		}
+            try_shutdown("Timer too close");
         if (tl == &deleted_timer)
             add->next = deleted_timer.next;
         else
@@ -110,11 +104,6 @@ sched_add_timer(struct timer *add)
         insert_timer(tl, add, waketime);
     }
     irq_restore(flag);
-    if(flags)
-	{			
-		output("Timer too close");
-		flags = 0;
-	}
 }
 
 // The deleted timer is used when deleting an active timer.
@@ -216,11 +205,15 @@ sched_wake_tasks(void)
     SchedStatus.tasks_status = TS_REQUESTED;
 }
 
-// Check if tasks need to be run
+// Check if tasks busy (called from low-level timer dispatch code)
 uint8_t
-sched_tasks_busy(void)
+sched_check_set_tasks_busy(void)
 {
-    return SchedStatus.tasks_status >= TS_REQUESTED;
+    // Return busy if tasks never idle between two consecutive calls
+    if (SchedStatus.tasks_busy >= TS_REQUESTED)
+        return 1;
+    SchedStatus.tasks_busy = SchedStatus.tasks_status;
+    return 0;
 }
 
 // Note that a task is ready to run
@@ -254,15 +247,9 @@ run_tasks(void)
             irq_disable();
             if (SchedStatus.tasks_status != TS_REQUESTED) {
                 // Sleep processor (only run timers) until tasks woken
-                SchedStatus.tasks_status = TS_IDLE;
+                SchedStatus.tasks_status = SchedStatus.tasks_busy = TS_IDLE;
                 do {
-#if CONFIG_MACH_LINUX
                     irq_wait();
-#else
-					asm volatile("cpsie i" ::: "memory");
-					extern void prtouch_task(void);
-					prtouch_task();
-#endif
                 } while (SchedStatus.tasks_status != TS_REQUESTED);
             }
             irq_enable();
@@ -337,15 +324,6 @@ sched_try_shutdown(uint_fast8_t reason)
 {
     if (!SchedStatus.shutdown_status)
         sched_shutdown(reason);
-}
-
-//Only report error message to host 
-void __always_inline
-sched_fake_shutdown(uint_fast8_t reason)
-{
-    uint32_t cur = timer_read_time();
-    sendf("fakeshutdown clock=%u static_string_id=%hu", cur
-          , reason);
 }
 
 static jmp_buf shutdown_jmp;

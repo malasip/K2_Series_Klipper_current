@@ -3,28 +3,40 @@
 # Copyright (C) 2020 Eric Callahan <arksine.code@gmail.com>
 #
 # This file may be distributed under the terms of the GNU GPLv3 license
-import logging, socket, os, sys, errno, json, collections
+import logging, socket, os, sys, errno, collections
 import gcode
 
-REQUEST_LOG_SIZE = 20
+try:
+    import msgspec
+except ImportError:
+    import json
 
-# Json decodes strings as unicode types in Python 2.x.  This doesn't
-# play well with some parts of Klipper (particuarly displays), so we
-# need to create an object hook. This solution borrowed from:
-#
-# https://stackoverflow.com/questions/956867/
-#
-json_loads_byteify = None
-if sys.version_info.major < 3:
-    def json_loads_byteify(data, ignore_dicts=False):
-        if isinstance(data, unicode):
-            return data.encode('utf-8')
-        if isinstance(data, list):
-            return [json_loads_byteify(i, True) for i in data]
-        if isinstance(data, dict) and not ignore_dicts:
-            return {json_loads_byteify(k, True): json_loads_byteify(v, True)
-                    for k, v in data.items()}
-        return data
+    # Json decodes strings as unicode types in Python 2.x.  This doesn't
+    # play well with some parts of Klipper (particularly displays), so we
+    # need to create an object hook. This solution borrowed from:
+    #
+    # https://stackoverflow.com/questions/956867/
+    #
+    json_loads_byteify = None
+    if sys.version_info.major < 3:
+        def json_loads_byteify(data, ignore_dicts=False):
+            if isinstance(data, unicode):
+                return data.encode('utf-8')
+            if isinstance(data, list):
+                return [json_loads_byteify(i, True) for i in data]
+            if isinstance(data, dict) and not ignore_dicts:
+                return {json_loads_byteify(k, True): json_loads_byteify(v, True)
+                        for k, v in data.items()}
+            return data
+    def json_dumps(obj):
+        return json.dumps(obj, separators=(',', ':')).encode()
+    def json_loads(data):
+        return json.loads(data, object_hook=json_loads_byteify)
+else:
+    json_dumps = msgspec.json.encode
+    json_loads = msgspec.json.decode
+
+REQUEST_LOG_SIZE = 20
 
 class WebRequestError(gcode.CommandError):
     def __init__(self, message,):
@@ -42,14 +54,14 @@ class WebRequest:
     error = WebRequestError
     def __init__(self, client_conn, request):
         self.client_conn = client_conn
-        base_request = json.loads(request, object_hook=json_loads_byteify)
+        base_request = json_loads(request)
         if type(base_request) != dict:
             raise ValueError("Not a top-level dictionary")
         self.id = base_request.get('id', None)
         self.method = base_request.get('method')
         self.params = base_request.get('params', {})
         if type(self.method) != str or type(self.params) != dict:
-            raise ValueError("""{"code":"key178", "msg": "Invalid request type", "values": []}""")
+            raise ValueError("Invalid request type")
         self.response = None
         self.is_error = False
 
@@ -59,10 +71,10 @@ class WebRequest:
     def get(self, item, default=Sentinel, types=None):
         value = self.params.get(item, default)
         if value is Sentinel:
-            raise WebRequestError("""{"code":"key179", "msg": "Missing Argument [%s]", "values": ["%s"]}""" % (item, item))
+            raise WebRequestError("Missing Argument [%s]" % (item,))
         if (types is not None and type(value) not in types
             and item in self.params):
-            raise WebRequestError("""{"code":"key180", "msg": "Invalid Argument Type [%s]", "values": ["%s"]}""" % (item, item))
+            raise WebRequestError("Invalid Argument Type [%s]" % (item,))
         return value
 
     def get_str(self, item, default=Sentinel):
@@ -124,7 +136,7 @@ class ServerSocket:
         printer.register_event_handler(
             'klippy:disconnect', self._handle_disconnect)
         printer.register_event_handler(
-            "klippy:shutdown", self._handle_shutdown)
+            "klippy:analyze_shutdown", self._handle_analyze_shutdown)
 
     def _handle_accept(self, eventtime):
         try:
@@ -145,7 +157,7 @@ class ServerSocket:
             except socket.error:
                 pass
 
-    def _handle_shutdown(self):
+    def _handle_analyze_shutdown(self, msg, details):
         for client in self.clients.values():
             client.dump_request_log()
 
@@ -228,15 +240,11 @@ class ClientConnection:
         except socket.error as e:
             # If bad file descriptor allow connection to be
             # closed by the data check
-            logging.error("process_received 1 e:%s" % str(e))
             if e.errno == errno.EBADF:
-                logging.error("process_received 2 e:%s" % str(e))
                 data = b""
             else:
-                logging.error("process_received 3 %s" % str(e.errno))
                 return
         if not data:
-            logging.error("process_received 4 not data Socket Closed")
             # Socket Closed
             self.close()
             return
@@ -272,8 +280,14 @@ class ClientConnection:
         self.send(result)
 
     def send(self, data):
-        jmsg = json.dumps(data, separators=(',', ':'))
-        self.send_buffer += jmsg.encode() + b"\x03"
+        try:
+            jmsg = json_dumps(data)
+            self.send_buffer += jmsg + b"\x03"
+        except (TypeError, ValueError) as e:
+            msg = ("json encoding error: %s" % (str(e),))
+            logging.exception(msg)
+            self.printer.invoke_shutdown(msg)
+            return
         if not self.is_blocking:
             self._do_send()
 
@@ -304,7 +318,6 @@ class WebHooks:
         self._endpoints = {"list_endpoints": self._handle_list_endpoints}
         self._remote_methods = {}
         self._mux_endpoints = {}
-        self.register_endpoint("shakehands", self._handle_shakehands_request)
         self.register_endpoint("info", self._handle_info_request)
         self.register_endpoint("emergency_stop", self._handle_estop_request)
         self.register_endpoint("register_remote_method",
@@ -324,12 +337,12 @@ class WebHooks:
         prev_key, prev_values = prev
         if prev_key != key:
             raise self.printer.config_error(
-                """{"code":"key182", "msg": "mux endpoint %s %s %s may have only one key (%s)", "values": ["%s", "%s", "%s", "%s"]}"""
-                % (path, key, value, prev_key, path, key, value, prev_key))
+                "mux endpoint %s %s %s may have only one key (%s)"
+                % (path, key, value, prev_key))
         if value in prev_values:
             raise self.printer.config_error(
-                """{"code":"key182", "msg": "mux endpoint %s %s %s already registered (%s)", "values": ["%s", "%s", "%s", "%s"]}"""
-                % (path, key, value, prev_values, path, key, value, prev_values))
+                "mux endpoint %s %s %s already registered (%s)"
+                % (path, key, value, prev_values))
         prev_values[value] = callback
 
     def _handle_mux(self, web_request):
@@ -339,25 +352,12 @@ class WebHooks:
         else:
             key_param = web_request.get(key)
         if key_param not in values:
-            raise web_request.error("""{"code":"key183", "msg": "The value '%s' is not valid for %s", "values": ["%s", "%s"]}"""
-                                    % (key_param, key, key_param, key))
+            raise web_request.error("The value '%s' is not valid for %s"
+                                    % (key_param, key))
         values[key_param](web_request)
 
     def _handle_list_endpoints(self, web_request):
         web_request.send({'endpoints': list(self._endpoints.keys())})
-
-    def _handle_shakehands_request(self, web_request):
-        try:
-            state_message, state = self.printer.get_state_message()
-            response = {"state": state, "state_message": state_message}
-            curtime = self.printer.get_reactor().monotonic()
-            web_request_id = web_request.id
-            response["shakehands_id"] = web_request_id
-            response["curtime"] = curtime
-            web_request.send(response)
-        except Exception as err:
-            err_msg = "_handle_shakehands_request err " + str(err)
-            logging.error(err_msg)
 
     def _handle_info_request(self, web_request):
         client_info = web_request.get_dict('client_info', None)
@@ -366,9 +366,14 @@ class WebHooks:
         state_message, state = self.printer.get_state_message()
         src_path = os.path.dirname(__file__)
         klipper_path = os.path.normpath(os.path.join(src_path, ".."))
-        response = {'state': state, 'state_message': state_message,
+        response = {'state': state,
+                    'state_message': state_message,
                     'hostname': socket.gethostname(),
-                    'klipper_path': klipper_path, 'python_path': sys.executable}
+                    'klipper_path': klipper_path,
+                    'python_path': sys.executable,
+                    'process_id': os.getpid(),
+                    'user_id': os.getuid(),
+                    'group_id': os.getgid()}
         start_args = self.printer.get_start_args()
         for sa in ['log_file', 'config_file', 'software_version', 'cpu_info']:
             response[sa] = start_args.get(sa)
@@ -391,7 +396,7 @@ class WebHooks:
     def get_callback(self, path):
         cb = self._endpoints.get(path, None)
         if cb is None:
-            msg = """{"code":"key184", "msg": "webhooks: No registered callback for path '%s'", "values": ["%s"]}""" % (path, path)
+            msg = "webhooks: No registered callback for path '%s'" % (path)
             logging.info(msg)
             raise WebRequestError(msg)
         return cb
@@ -406,7 +411,7 @@ class WebHooks:
     def call_remote_method(self, method, **kwargs):
         if method not in self._remote_methods:
             raise self.printer.command_error(
-                """{"code":"key185", "msg": "Remote method '%s' not registered", "values": ["%s"]}""" % (method, method))
+                "Remote method '%s' not registered" % (method))
         conn_map = self._remote_methods[method]
         valid_conns = {}
         for conn, template in conn_map.items():
@@ -418,7 +423,7 @@ class WebHooks:
         if not valid_conns:
             del self._remote_methods[method]
             raise self.printer.command_error(
-                """{"code":"key186", "msg": "No active connections for method '%s'", "values": ["%s"]}""" % (method, method))
+                "No active connections for method '%s'" % (method))
         self._remote_methods[method] = valid_conns
 
 class GCodeHelper:
@@ -486,56 +491,56 @@ class QueryStatusHelper:
         self.pending_queries = []
         msglist.extend(self.clients.values())
         # Generate get_status() info for each client
-        for cconn, subscription, send_func, template in msglist:
-            is_query = cconn is None
-            if not is_query and cconn.is_closed():
-                del self.clients[cconn]
-                continue
-            # Query each requested printer object
-            cquery = {}
-            for obj_name, req_items in subscription.items():
-                res = query.get(obj_name, None)
-                if res is None:
-                    po = self.printer.lookup_object(obj_name, None)
-                    if po is None or not hasattr(po, 'get_status'):
-                        res = query[obj_name] = {}
-                    else:
-                        res = query[obj_name] = po.get_status(eventtime)
-                if req_items is None:
-                    req_items = list(res.keys())
-                    if req_items:
-                        subscription[obj_name] = req_items
-                lres = last_query.get(obj_name, {})
-                cres = {}
-                for ri in req_items:
-                    rd = res.get(ri, None)
-                    if is_query or rd != lres.get(ri):
-                        cres[ri] = rd
-                if cres or is_query:
-                    cquery[obj_name] = cres
-            # Send data
-            if cquery or is_query:
-                tmp = dict(template)
-                tmp['params'] = {'eventtime': eventtime, 'status': cquery}
-                send_func(tmp)
+        reactor = self.printer.get_reactor()
+        with reactor.assert_no_pause():
+            for cconn, subscription, send_func, template in msglist:
+                is_query = cconn is None
+                if not is_query and cconn.is_closed():
+                    del self.clients[cconn]
+                    continue
+                # Query each requested printer object
+                cquery = {}
+                for obj_name, req_items in subscription.items():
+                    res = query.get(obj_name, None)
+                    if res is None:
+                        po = self.printer.lookup_object(obj_name, None)
+                        if po is None or not hasattr(po, 'get_status'):
+                            res = query[obj_name] = {}
+                        else:
+                            res = query[obj_name] = po.get_status(eventtime)
+                    if req_items is None:
+                        req_items = list(res.keys())
+                        if req_items:
+                            subscription[obj_name] = req_items
+                    lres = last_query.get(obj_name, {})
+                    cres = {}
+                    for ri in req_items:
+                        rd = res.get(ri, None)
+                        if is_query or rd != lres.get(ri):
+                            cres[ri] = rd
+                    if cres or is_query:
+                        cquery[obj_name] = cres
+                # Send data
+                if cquery or is_query:
+                    tmp = dict(template)
+                    tmp['params'] = {'eventtime': eventtime, 'status': cquery}
+                    send_func(tmp)
         if not query:
             # Unregister timer if there are no longer any subscriptions
-            reactor = self.printer.get_reactor()
             reactor.unregister_timer(self.query_timer)
             self.query_timer = None
             return reactor.NEVER
         return eventtime + SUBSCRIPTION_REFRESH_TIME
-    def _handle_query(self, web_request, is_subscribe=False, handle_subscribe=False):
+    def _handle_query(self, web_request, is_subscribe=False):
         objects = web_request.get_dict('objects')
-        logging.info("_handle_query objects/subscribe:%s" % str(objects)) if handle_subscribe else None
         # Validate subscription format
         for k, v in objects.items():
             if type(k) != str or (v is not None and type(v) != list):
-                raise web_request.error("""{"code":"key187", "msg": "Invalid argument", "values": []}""")
+                raise web_request.error("Invalid argument")
             if v is not None:
                 for ri in v:
                     if type(ri) != str:
-                        raise web_request.error("""{"code":"key187", "msg": "Invalid argument", "values": []}""")
+                        raise web_request.error("Invalid argument")
         # Add to pending queries
         cconn = web_request.get_client_connection()
         template = web_request.get_dict('response_template', {})
@@ -549,14 +554,12 @@ class QueryStatusHelper:
             qt = reactor.register_timer(self._do_query, reactor.NOW)
             self.query_timer = qt
         # Wait for data to be queried
-        logging.info("_handle_query before complete.wait") if handle_subscribe else None
         msg = complete.wait()
-        logging.info("_handle_query after complete.wait:%s" % str(msg['params'])) if handle_subscribe else None
         web_request.send(msg['params'])
         if is_subscribe:
             self.clients[cconn] = (cconn, objects, cconn.send, template)
     def _handle_subscribe(self, web_request):
-        self._handle_query(web_request, is_subscribe=True, handle_subscribe=True)
+        self._handle_query(web_request, is_subscribe=True)
 
 def add_early_printer_objects(printer):
     printer.add_object('webhooks', WebHooks(printer))

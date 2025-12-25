@@ -16,6 +16,8 @@ class PrintStats:
         self.gcode.register_command(
             "SET_PRINT_STATS_INFO", self.cmd_SET_PRINT_STATS_INFO,
             desc=self.cmd_SET_PRINT_STATS_INFO_help)
+        printer.register_event_handler("extruder:activate_extruder",
+                                       self._handle_activate_extruder)
         # G28 down 12mm flag
         self.power_loss = 0
         self.print_duration = 0
@@ -30,6 +32,9 @@ class PrintStats:
             except Exception as err:
                 logging.error(err)
         return z_pos
+    def _handle_activate_extruder(self):
+        gc_status = self.gcode_move.get_status()
+        self.last_epos = gc_status['position'].e
     def _update_filament_usage(self, eventtime):
         gc_status = self.gcode_move.get_status(eventtime)
         cur_epos = gc_status['position'].e
@@ -68,6 +73,8 @@ class PrintStats:
             pause_duration = curtime - self.last_pause_time
             self.prev_pause_duration += pause_duration
             self.last_pause_time = None
+        # Reset last e-position
+        gc_status = self.gcode_move.get_status(curtime)
         self.last_epos = gc_status['position'].e
         self.state = "printing"
         self.error_message = ""

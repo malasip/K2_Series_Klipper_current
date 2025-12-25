@@ -2,11 +2,12 @@
 //
 // Copyright (C) 2019 Eug Krashtan <eug.krashtan@gmail.com>
 // Copyright (C) 2020 Pontus Borg <glpontus@gmail.com>
-// Copyright (C) 2021  Kevin O'Connor <kevin@koconnor.net>
+// Copyright (C) 2021-2025  Kevin O'Connor <kevin@koconnor.net>
 //
 // This file may be distributed under the terms of the GNU GPLv3 license.
 
 #include <string.h> // memcpy
+#include "autoconf.h" // CONFIG_HAVE_BOOTLOADER_REQUEST
 #include "board/io.h" // readb
 #include "board/irq.h" // irq_save
 #include "board/misc.h" // console_sendf
@@ -185,7 +186,7 @@ can_process_set_klipper_nodeid(struct canbus_msg *msg)
 static void
 can_process_request_bootloader(struct canbus_msg *msg)
 {
-    if (!can_check_uuid(msg))
+    if (!CONFIG_HAVE_BOOTLOADER_REQUEST || !can_check_uuid(msg))
         return;
     bootloader_request();
 }
@@ -223,7 +224,7 @@ canserial_notify_rx(void)
 DECL_CONSTANT("RECEIVE_WINDOW", ARRAY_SIZE(CanData.receive_buf));
 
 // Handle incoming data (called from IRQ handler)
-int
+void
 canserial_process_data(struct canbus_msg *msg)
 {
     uint32_t id = msg->id;
@@ -232,7 +233,7 @@ canserial_process_data(struct canbus_msg *msg)
         int rpos = CanData.receive_pos;
         uint32_t len = CANMSG_DATA_LEN(msg);
         if (len > sizeof(CanData.receive_buf) - rpos)
-            return -1;
+            return;
         memcpy(&CanData.receive_buf[rpos], msg->data, len);
         CanData.receive_pos = rpos + len;
         canserial_notify_rx();
@@ -242,13 +243,12 @@ canserial_process_data(struct canbus_msg *msg)
         uint32_t pushp = CanData.admin_push_pos;
         if (pushp >= CanData.admin_pull_pos + ARRAY_SIZE(CanData.admin_queue))
             // No space - drop message
-            return -1;
+            return;
         uint32_t pos = pushp % ARRAY_SIZE(CanData.admin_queue);
         memcpy(&CanData.admin_queue[pos], msg, sizeof(*msg));
         CanData.admin_push_pos = pushp + 1;
         canserial_notify_rx();
     }
-    return 0;
 }
 
 // Remove from the receive buffer the given number of bytes
@@ -317,6 +317,25 @@ DECL_TASK(canserial_rx_task);
 /****************************************************************
  * Setup and shutdown
  ****************************************************************/
+
+DECL_ENUMERATION("canbus_bus_state", "active", CANBUS_STATE_ACTIVE);
+DECL_ENUMERATION("canbus_bus_state", "warn", CANBUS_STATE_WARN);
+DECL_ENUMERATION("canbus_bus_state", "passive", CANBUS_STATE_PASSIVE);
+DECL_ENUMERATION("canbus_bus_state", "off", CANBUS_STATE_OFF);
+
+void
+command_get_canbus_status(uint32_t *args)
+{
+    struct canbus_status status;
+    memset(&status, 0, sizeof(status));
+    canhw_get_status(&status);
+    sendf("canbus_status rx_error=%u tx_error=%u tx_retries=%u"
+          " canbus_bus_state=%u"
+          , status.rx_error, status.tx_error, status.tx_retries
+          , status.bus_state);
+}
+DECL_COMMAND_FLAGS(command_get_canbus_status, HF_IN_SHUTDOWN
+                   , "get_canbus_status");
 
 void
 command_get_canbus_id(uint32_t *args)

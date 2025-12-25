@@ -32,6 +32,14 @@ lookup_clock_line(uint32_t periph_base)
         uint32_t bit = 1 << ((periph_base - AHBPERIPH_BASE) / 0x400);
         return (struct cline){.en=&RCC->AHBENR, .rst=&RCC->AHBRSTR, .bit=bit};
     }
+#ifdef USART5_BASE
+    if (periph_base == USART5_BASE)
+        return (struct cline){.en=&RCC->APBENR1,.rst=&RCC->APBRSTR1,.bit=1<<8};
+#endif
+#ifdef USART6_BASE
+    if (periph_base == USART6_BASE)
+        return (struct cline){.en=&RCC->APBENR1,.rst=&RCC->APBRSTR1,.bit=1<<9};
+#endif
 #if defined(FDCAN1_BASE) || defined(FDCAN2_BASE)
     if ((periph_base == FDCAN1_BASE) || (periph_base == FDCAN2_BASE))
         return (struct cline){.en=&RCC->APBENR1,.rst=&RCC->APBRSTR1,.bit=1<<12};
@@ -89,6 +97,8 @@ gpio_clock_enable(GPIO_TypeDef *regs)
     RCC->IOPENR;
 }
 
+// PLL (g0) input: 2.66 to 16Mhz, vco: 96 to 344Mhz, output: 12 to 64Mhz
+
 #if !CONFIG_STM32_CLOCK_REF_INTERNAL
 DECL_CONSTANT_STR("RESERVE_PINS_crystal", "PF0,PF1");
 #endif
@@ -110,8 +120,11 @@ clock_setup(void)
     }
     pllcfgr |= (pll_freq/pll_base) << RCC_PLLCFGR_PLLN_Pos;
     pllcfgr |= (pll_freq/CONFIG_CLOCK_FREQ - 1) << RCC_PLLCFGR_PLLR_Pos;
-    pllcfgr |= (pll_freq/FREQ_USB - 1) << RCC_PLLCFGR_PLLQ_Pos;
-    RCC->PLLCFGR = pllcfgr | RCC_PLLCFGR_PLLREN | RCC_PLLCFGR_PLLQEN;
+#ifdef RCC_PLLCFGR_PLLQ
+    pllcfgr |= ((pll_freq/FREQ_USB - 1) << RCC_PLLCFGR_PLLQ_Pos)
+            | RCC_PLLCFGR_PLLQEN;
+#endif
+    RCC->PLLCFGR = pllcfgr | RCC_PLLCFGR_PLLREN;
     RCC->CR |= RCC_CR_PLLON;
 
     // Wait for PLL lock
@@ -123,12 +136,10 @@ clock_setup(void)
     while ((RCC->CFGR & RCC_CFGR_SWS_Msk) != (2 << RCC_CFGR_SWS_Pos))
         ;
 
-	#ifdef RCC_CCIPR2_USBSEL_Pos
-
+#ifdef USB_BASE
     // Use PLLQCLK for USB (setting USBSEL=2 works in practice)
     RCC->CCIPR2 = 2 << RCC_CCIPR2_USBSEL_Pos;
-
-	#endif
+#endif
 }
 
 
@@ -153,6 +164,8 @@ bootloader_request(void)
 void
 armcm_main(void)
 {
+    // Disable internal pull-down resistors on UCPDx CCx pins
+    SYSCFG->CFGR1 |= (SYSCFG_CFGR1_UCPD1_STROBE | SYSCFG_CFGR1_UCPD2_STROBE);
     SCB->VTOR = (uint32_t)VectorTable;
 
     // Reset clock registers (in case bootloader has changed them)

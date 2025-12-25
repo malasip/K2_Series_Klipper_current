@@ -33,14 +33,15 @@ dirs-y = src
 cc-option=$(shell if test -z "`$(1) $(2) -S -o /dev/null -xc /dev/null 2>&1`" \
     ; then echo "$(2)"; else echo "$(3)"; fi ;)
 
-CFLAGS := -I$(OUT) -Isrc -I$(OUT)board-generic/ -std=gnu11 -O2 -MD \
-    -Wall -Wold-style-definition $(call cc-option,$(CC),-Wtype-limits,) \
+CFLAGS := -iquote $(OUT) -iquote src -iquote $(OUT)board-generic/ \
+		-std=gnu11 -O2 -MD -Wall \
+		-Wold-style-definition $(call cc-option,$(CC),-Wtype-limits,) \
     -ffunction-sections -fdata-sections -fno-delete-null-pointer-checks
-CFLAGS += -flto -fwhole-program -fno-use-linker-plugin -ggdb3
+CFLAGS += -flto=auto -fwhole-program -fno-use-linker-plugin -ggdb3
 
 OBJS_klipper.elf = $(patsubst %.c, $(OUT)src/%.o,$(src-y))
 OBJS_klipper.elf += $(OUT)compile_time_request.o
-CFLAGS_klipper.elf = $(CFLAGS) -Wl,--gc-sections -Wl,-Map,out/klipper.map
+CFLAGS_klipper.elf = $(CFLAGS) -Wl,--gc-sections
 
 CPPFLAGS = -I$(OUT) -P -MD -MT $@
 
@@ -51,7 +52,6 @@ CR_BUILD_OBJ += $(OUT)src/prtouch_v3.o \
 # Default targets
 target-y := $(OUT)klipper.elf
 target-y += $(OUT)hostCrc16.elf
-# target-y += $(OUT)src/prtouch_v2.o
 target-y += $(CR_BUILD_OBJ)
 
 all:

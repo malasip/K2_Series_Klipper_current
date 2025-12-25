@@ -30,19 +30,25 @@ class StepperPosition:
         self.endstop_name = endstop_name
         self.stepper_name = stepper.get_name()
         self.start_pos = stepper.get_mcu_position()
+        self.start_cmd_pos = stepper.mcu_to_commanded_position(self.start_pos)
         self.halt_pos = self.trig_pos = None
     def note_home_end(self, trigger_time):
         self.halt_pos = self.stepper.get_mcu_position()
         self.trig_pos = self.stepper.get_past_mcu_position(trigger_time)
+    def verify_no_probe_skew(self, haltpos):
+        new_start_pos = self.stepper.get_mcu_position(self.start_cmd_pos)
+        if new_start_pos != self.start_pos:
+            logging.warning(
+                "Stepper '%s' position skew after probe: pos %d now %d",
+                self.stepper.get_name(), self.start_pos, new_start_pos)
 
 # Implementation of homing/probing moves
 class HomingMove:
     def __init__(self, printer, endstops, toolhead=None):
         self.printer = printer
-        self.endstops = endstops
+        self.endstops = [es for es in endstops if es[0].get_steppers()]
         if toolhead is None:
             toolhead = printer.lookup_object('toolhead')
-
         self.prtouch_v3 = printer.lookup_object('prtouch_v3')
         self.prtouch_v3.z_full_movement_flag = False
         self.toolhead = toolhead
@@ -68,7 +74,9 @@ class HomingMove:
             sname = stepper.get_name()
             kin_spos[sname] += offsets.get(sname, 0) * stepper.get_step_dist()
         thpos = self.toolhead.get_position()
-        return list(kin.calc_position(kin_spos))[:3] + thpos[3:]
+        cpos = kin.calc_position(kin_spos)
+        return [cp if cp is not None else tp
+                for cp, tp in zip(cpos, thpos[:3])] + thpos[3:]
     def handle_force_stop(self):
         # 拉高pa9 en引脚, 清除运动队列, 查询保护码, 设置xy电机到错误码输出模式
         # self.printer.lookup_object('motor_control').force_stop()
@@ -88,11 +96,9 @@ class HomingMove:
         kin = self.toolhead.get_kinematics()
         kin_spos = {s.get_name(): s.get_commanded_position()
                     for s in kin.get_steppers()}
-        
         self.stepper_positions = [ StepperPosition(s, name)
                                    for es, name in self.endstops
                                    for s in es.get_steppers() ]
-
         # Start endstop checking
         print_time = self.toolhead.get_last_move_time()
         endstop_triggers = []
@@ -109,22 +115,25 @@ class HomingMove:
         try:
             self.toolhead.drip_move(movepos, speed, all_endstop_trigger)
         except self.printer.command_error as e:
-            error = """{"code":"key20", "msg":"Error during homing move: %s", "values": [%s]}""" % (str(e),str(e))
-            logging.info("No trigger on %s after full movement, set MOTOR_STALL_MODE DATA=2"%name)
-            self.handle_force_stop()
+            error = "Error during homing move: %s" % (str(e),)
         # Wait for endstops to trigger
         trigger_times = {}
         move_end_print_time = self.toolhead.get_last_move_time()
         for mcu_endstop, name in self.endstops:
-            trigger_time = mcu_endstop.home_wait(move_end_print_time)
+            try:
+                trigger_time = mcu_endstop.home_wait(move_end_print_time)
+            except self.printer.command_error as e:
+                if error is None:
+                    error = "Error during homing %s: %s" % (name, str(e))
+                continue
             if trigger_time > 0.:
                 trigger_times[name] = trigger_time
             elif trigger_time < 0. and error is None:
-                error = """{"code":"key21", "msg":"Communication timeout during homing %s", "values": ["%s"]}""" % (name, name)
+                error = "Communication timeout during homing %s" % (name, name)
                 logging.info("Communication timeout during homing %s, set MOTOR_STALL_MODE DATA=2"%name)
                 self.handle_force_stop()
             elif check_triggered and error is None:
-                error = """{"code":"key22", "msg":"No trigger on %s after full movement", "values": ["%s"]}""" % (name, name)
+                error = "No trigger on %s after full movement" % (name,)
                 # z轴误触发后,对x、y电机进行切换为错误码输出模式
                 if name == "z":
                     error = None
@@ -147,6 +156,9 @@ class HomingMove:
             haltpos = trigpos = self.calc_toolhead_pos(kin_spos, trig_steps)
             if trig_steps != halt_steps:
                 haltpos = self.calc_toolhead_pos(kin_spos, halt_steps)
+            self.toolhead.set_position(haltpos)
+            for sp in self.stepper_positions:
+                sp.verify_no_probe_skew(haltpos)
         else:
             haltpos = trigpos = movepos
             over_steps = {sp.stepper_name: sp.halt_pos - sp.trig_pos
@@ -156,7 +168,7 @@ class HomingMove:
                 halt_kin_spos = {s.get_name(): s.get_commanded_position()
                                  for s in kin.get_steppers()}
                 haltpos = self.calc_toolhead_pos(halt_kin_spos, over_steps)
-        self.toolhead.set_position(haltpos)
+            self.toolhead.set_position(haltpos)
         # Signal homing/probing move complete
         try:
             self.printer.send_event("homing:homing_move_end", self)
@@ -173,7 +185,7 @@ class HomingMove:
             if sp.start_pos == sp.trig_pos:
                 return sp.endstop_name
         return None
-        
+
 # State tracking of homing requests
 class Homing:
     def __init__(self, printer):
@@ -220,7 +232,8 @@ class Homing:
         # Notify of upcoming homing operation
         self.printer.send_event("homing:home_rails_begin", self, rails)
         # Alter kinematics class to think printer is at forcepos
-        homing_axes = [axis for axis in range(3) if forcepos[axis] is not None]
+        force_axes = [axis for axis in range(3) if forcepos[axis] is not None]
+        homing_axes = "".join(["xyz"[i] for i in force_axes])
         startpos = self._fill_coord(forcepos)
         homepos = self._fill_coord(movepos)
         self.toolhead.set_position(startpos, homing_axes=homing_axes)
@@ -255,7 +268,6 @@ class Homing:
             self.toolhead.set_position(startpos)
             hmove = HomingMove(self.printer, endstops)
             hmove.homing_move(homepos, hi.second_homing_speed)
-
             if hmove.check_no_movement() is not None and rails[0].get_name() == "stepper_z":
                 hmove.prtouch_v3.z_full_movement_flag = True
                 self.printer.send_event("homing:homing_move_end", hmove)
@@ -270,8 +282,8 @@ class Homing:
                 logging.info("hmove.check_no_movement %s, set MOTOR_STALL_MODE DATA=2" % hmove.check_no_movement())
                 hmove.handle_force_stop()
                 raise self.printer.command_error(
-                    """{"code":"key23", "msg":"Endstop %s still triggered after retract", "values": ["%s"]}"""
-                    % (hmove.check_no_movement(), hmove.check_no_movement()))
+                    "Endstop %s still triggered after retract"
+                    % (hmove.check_no_movement(),))
         # Signal home operation complete
         self.toolhead.flush_step_generation()
         self.trigger_mcu_pos = {sp.stepper_name: sp.trig_pos
@@ -286,7 +298,11 @@ class Homing:
                                        + self.adjust_pos.get(s.get_name(), 0.))
                         for s in kin.get_steppers()}
             newpos = kin.calc_position(kin_spos)
-            for axis in homing_axes:
+            for axis in force_axes:
+                if newpos[axis] is None:
+                    raise self.printer.command_error(
+                            "Cannot determine position of toolhead on "
+                            "axis %s after homing" % "xyz"[axis])
                 homepos[axis] = newpos[axis]
             self.toolhead.set_position(homepos)
 
@@ -314,10 +330,9 @@ class PrinterHoming:
         except self.printer.command_error:
             if self.printer.is_shutdown():
                 raise self.printer.command_error(
-                    '{"code": "key4", "msg": "Homing failed due to printer shutdown"}')
+                    "Homing failed due to printer shutdown")
             raise
     def probing_move(self, mcu_probe, pos, speed):
-
         endstops = [(mcu_probe, "probe")]
         hmove = HomingMove(self.printer, endstops)
         try:
@@ -328,12 +343,11 @@ class PrinterHoming:
         except self.printer.command_error:
             if self.printer.is_shutdown():
                 raise self.printer.command_error(
-                    '{"code": "key5", "msg": "Probing failed due to printer shutdown"}')
+                    "Probing failed due to printer shutdown")
             raise
-        # 暂时关闭该检查，跳过误触发导致报错问题，调平代码有异常点重探机制
-        # if hmove.check_no_movement() is not None:
-        #     raise self.printer.command_error(
-        #         '{"code": "key6", "msg": "Probe triggered prior to movement"}')
+        if hmove.check_no_movement() is not None:
+            raise self.printer.command_error(
+                "Probe triggered prior to movement")
         return epos
         
     def cmd_STEPPER_Z_SENEORLESS(self, gcmd):

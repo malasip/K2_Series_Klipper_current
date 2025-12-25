@@ -165,12 +165,11 @@ class PauseResume:
     cmd_PAUSE_help = ("Pauses the current print")
     def cmd_PAUSE(self, gcmd):
         if self.is_paused:
-            gcmd.respond_info("""{"code":"key211", "msg": "Print already paused", "values": []}""")
+            gcmd.respond_info("Print already paused")
             return
         self.send_pause_command()
         self.gcode.run_script_from_command("SAVE_GCODE_STATE NAME=PAUSE_STATE")
         self.is_paused = True
-        reportInformation("key601")
     def send_resume_command(self):
         if self.sd_paused:
             # Printing from virtual sd, run pause command

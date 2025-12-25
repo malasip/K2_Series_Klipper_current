@@ -21,7 +21,7 @@ class PrinterMultiPin:
         pin = self.printer.lookup_object('multi_pin ' + pin_name, None)
         if pin is not self:
             if pin is None:
-                raise ppins.error("""{"code":"key40", "msg":"multi_pin %s not configured", "values": ["%s"]}""" % (pin_name, pin_name))
+                raise ppins.error("multi_pin %s not configured" % (pin_name,))
             return pin.setup_pin(pin_type, pin_params)
         if self.pin_type is not None:
             raise ppins.error("Can't setup multi_pin %s twice" % (pin_name,))
@@ -46,9 +46,11 @@ class PrinterMultiPin:
     def set_digital(self, print_time, value):
         for mcu_pin in self.mcu_pins:
             mcu_pin.set_digital(print_time, value)
-    def set_pwm(self, print_time, value, cycle_time=None):
+    def next_aligned_print_time(self, print_time, allow_early=0.):
+        return print_time
+    def set_pwm(self, print_time, value):
         for mcu_pin in self.mcu_pins:
-            mcu_pin.set_pwm(print_time, value, cycle_time)
+            mcu_pin.set_pwm(print_time, value)
 
 def load_config_prefix(config):
     return PrinterMultiPin(config)

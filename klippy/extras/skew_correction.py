@@ -20,6 +20,7 @@ class PrinterSkew:
     def __init__(self, config):
         self.printer = config.get_printer()
         self.name = config.get_name()
+        self.current_profile_name = ""
         self.toolhead = None
         self.xy_factor = 0.
         self.xz_factor = 0.
@@ -58,12 +59,12 @@ class PrinterSkew:
         skewed_x = pos[0] - pos[1] * self.xy_factor \
             - pos[2] * (self.xz_factor - (self.xy_factor * self.yz_factor))
         skewed_y = pos[1] - pos[2] * self.yz_factor
-        return [skewed_x, skewed_y, pos[2], pos[3]]
+        return [skewed_x, skewed_y] + pos[2:]
     def calc_unskew(self, pos):
         skewed_x = pos[0] + pos[1] * self.xy_factor \
             + pos[2] * self.xz_factor
         skewed_y = pos[1] + pos[2] * self.yz_factor
-        return [skewed_x, skewed_y, pos[2], pos[3]]
+        return [skewed_x, skewed_y] + pos[2:]
     def get_position(self):
         return self.calc_unskew(self.next_transform.get_position())
     def move(self, newpos, speed):
@@ -109,14 +110,15 @@ class PrinterSkew:
                         raise Exception
                 except Exception:
                     raise gcmd.error(
-                        """{"code": "key315", "msg": "skew_correction: improperly formatted entry for plane [%s]\n%s", "values":["%s", "%s"]}""" % (
-                            plane, gcmd.get_commandline(), plane, gcmd.get_commandline()))
+                        "skew_correction: improperly formatted entry for "
+                        "plane [%s]\n%s" % (plane, gcmd.get_commandline()))
                 factor = plane.lower() + '_factor'
                 setattr(self, factor, calc_skew_factor(*lengths))
     cmd_SKEW_PROFILE_help = "Profile management for skew_correction"
     def cmd_SKEW_PROFILE(self, gcmd):
         if gcmd.get('LOAD', None) is not None:
             name = gcmd.get('LOAD')
+            self.current_profile_name = name
             prof = self.skew_profiles.get(name)
             if prof is None:
                 gcmd.respond_info(
@@ -156,7 +158,10 @@ class PrinterSkew:
                 gcmd.respond_info(
                     "skew_correction: No profile named [%s] to remove"
                     % (name))
-
+    def get_status(self, eventtime):
+        return {
+            'current_profile_name': self.current_profile_name
+        }
 
 def load_config(config):
     return PrinterSkew(config)

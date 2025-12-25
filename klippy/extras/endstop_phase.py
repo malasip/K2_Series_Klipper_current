@@ -6,7 +6,8 @@
 import math, logging
 import stepper
 
-TRINAMIC_DRIVERS = ["tmc2130", "tmc2208", "tmc2209", "tmc2660", "tmc5160"]
+TRINAMIC_DRIVERS = ["tmc2130", "tmc2208", "tmc2209", "tmc2240", "tmc2660",
+    "tmc5160"]
 
 # Calculate the trigger phase of a stepper motor
 class PhaseCalc:
@@ -51,7 +52,7 @@ class PhaseCalc:
 class EndstopPhase:
     def __init__(self, config):
         self.printer = config.get_printer()
-        self.name = config.get_name().split()[1]
+        self.name = " ".join(config.get_name().split()[1:])
         # Obtain step_distance and microsteps from stepper config section
         sconfig = config.getsection(self.name)
         rotation_dist, steps_per_rotation = stepper.parse_step_distance(sconfig)
@@ -70,9 +71,8 @@ class EndstopPhase:
         if trigger_phase is not None:
             p, ps = config.getintlist('trigger_phase', sep='/', count=2)
             if p >= ps:
-                raise config.error(
-                                    """{"code":"key157", "msg": "Invalid trigger_phase '%s'", "values": ["%s"]}""" % (trigger_phase, trigger_phase)
-                                   )
+                raise config.error("Invalid trigger_phase '%s'"
+                                   % (trigger_phase,))
             self.endstop_phase = self.phase_calc.convert_phase(p, ps)
         self.endstop_align_zero = config.getboolean('endstop_align_zero', False)
         self.endstop_accuracy = config.getfloat('endstop_accuracy', None,
@@ -87,11 +87,8 @@ class EndstopPhase:
             self.endstop_phase_accuracy = int(
                 math.ceil(self.endstop_accuracy / self.step_dist))
         if self.endstop_phase_accuracy >= self.phases // 2:
-            raise config.error(
-                               """{"code":"key158", "msg": "Endstop for %s is not accurate enough for stepper phase adjustment", "values": ["%s"]}""" % (
-                                   self.name, self.name
-                               )
-                               )
+            raise config.error("Endstop for %s is not accurate enough for"
+                               " stepper phase adjustment" % (self.name,))
         if self.printer.get_start_args().get('debugoutput') is not None:
             self.endstop_phase_accuracy = self.phases
     def align_endstop(self, rail):
@@ -116,14 +113,12 @@ class EndstopPhase:
             delta -= self.phases
         elif delta > self.endstop_phase_accuracy:
             raise self.printer.command_error(
-                """{"code":"key161", "msg": "Endstop %s incorrect phase (got %d vs %d)", "values": ["%s", %d, %d]}""" % (
-                    self.name, phase, self.endstop_phase, self.name, phase, self.endstop_phase
-                )
-            )
+                "Endstop %s incorrect phase (got %d vs %d)" % (
+                    self.name, phase, self.endstop_phase))
         return delta * self.step_dist
     def handle_home_rails_end(self, homing_state, rails):
         for rail in rails:
-            stepper = rail.get_steppers()[0]
+            stepper = rail.get_endstops()[0][0].get_steppers()[0]
             if stepper.get_name() == self.name:
                 trig_mcu_pos = homing_state.get_trigger_position(self.name)
                 align = self.align_endstop(rail)
@@ -196,7 +191,6 @@ class EndstopPhases:
     def generate_stats(self, stepper_name, phase_calc):
         phase_history = phase_calc.phase_history
         wph = phase_history + phase_history
-        count = sum(phase_history)
         phases = len(phase_history)
         half_phases = phases // 2
         res = []

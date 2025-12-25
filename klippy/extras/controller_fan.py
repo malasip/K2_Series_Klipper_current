@@ -37,8 +37,9 @@ class ControllerFan:
             return
         if not all(x in all_steppers for x in self.stepper_names):
             raise self.printer.config_error(
-                """{"code":"key66", "msg":"One or more of these steppers are unknown: %s (valid steppers are: %s)", "values": ["%s", "%s"]}"""
-                % (self.stepper_names, ", ".join(all_steppers), self.stepper_names, ", ".join(all_steppers)))
+                "One or more of these steppers are unknown: "
+                 "%s (valid steppers are: %s)"
+                % (self.stepper_names, ", ".join(all_steppers)))
     def handle_ready(self):
         reactor = self.printer.get_reactor()
         reactor.register_timer(self.callback, reactor.monotonic()+PIN_MIN_TIME)
@@ -61,9 +62,7 @@ class ControllerFan:
             self.last_on += 1
         if speed != self.last_speed:
             self.last_speed = speed
-            curtime = self.printer.get_reactor().monotonic()
-            print_time = self.fan.get_mcu().estimated_print_time(curtime)
-            self.fan.set_speed(print_time + PIN_MIN_TIME, speed)
+            self.fan.set_speed(speed)
         return eventtime + 1.
 
 def load_config_prefix(config):

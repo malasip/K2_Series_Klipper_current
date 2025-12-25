@@ -7,6 +7,7 @@
 #include "autoconf.h" // CONFIG_CLOCK_REF_FREQ
 #include "board/armcm_boot.h" // VectorTable
 #include "board/irq.h" // irq_disable
+#include "board/misc.h" // bootloader_request
 #include "command.h" // DECL_CONSTANT_STR
 #include "internal.h" // enable_pclock
 #include "sched.h" // sched_main
@@ -41,7 +42,7 @@ lookup_clock_line(uint32_t periph_base)
                               .rst = &RCC->AHB1RSTR,
                               .bit = 1 << pos};
 
-    } else if (periph_base == ADC1_BASE) {
+    } else if (periph_base == ADC12_COMMON_BASE) {
         return (struct cline){.en = &RCC->AHB2ENR,
                               .rst = &RCC->AHB2RSTR,
                               .bit = RCC_AHB2ENR_ADCEN};
@@ -66,6 +67,8 @@ gpio_clock_enable(GPIO_TypeDef *regs)
     RCC->AHB2ENR |= 1 << rcc_pos;
     RCC->AHB2ENR;
 }
+
+// PLL (L412) input: 4 to 16Mhz, vco: 96 to 344Mhz, output: 12 to 80Mhz
 
 #if !CONFIG_STM32_CLOCK_REF_INTERNAL
 DECL_CONSTANT_STR("RESERVE_PINS_crystal", "PC14,PC15");
@@ -95,7 +98,7 @@ enable_clock_stm32l4(void)
     RCC->CR |= RCC_CR_PLLON;
 
     // Enable 48Mhz USB clock using clock recovery
-    if (CONFIG_USBSERIAL) {
+    if (CONFIG_USB) {
         RCC->CRRCR |= RCC_CRRCR_HSI48ON;
         while (!(RCC->CRRCR & RCC_CRRCR_HSI48RDY))
             ;

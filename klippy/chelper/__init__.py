@@ -5,53 +5,30 @@
 # This file may be distributed under the terms of the GNU GPLv3 license.
 import os, logging
 import cffi
-import sys
+
 
 ######################################################################
 # c_helper.so compiling
 ######################################################################
 
 GCC_CMD = "gcc"
-
-# 如果命令行参数中提供了新值，则使用新值
-# 交叉编译使用示例 
-# python ./klippy/chelper/__init__.py GCC_CMD=/home/zhan/Downloads/ingenic_linux-develop/tools/toolchains/mips-gcc720-glibc229/bin/mips-linux-gnu-gcc 
-if len(sys.argv) > 1: 
-    if sys.argv[1].startswith("GCC_CMD="):
-        GCC_CMD = sys.argv[1].split("=", 1)[1]
-    else:
-        logging.info("Not using GCC_CMD from command line: %s", sys.argv[1])
-
-# 检查 gcc 编译器是否存在
-def check_gcc_exists():
-    compiler_exists = os.system("which gcc > /dev/null 2>&1") == 0
-    return compiler_exists
-
-# 判断是否应该执行编译
-should_compile = check_gcc_exists()
-
-if should_compile:
-    logging.info("GCC compiler found. Compiling the source code...")
-    print("GCC compiler found. Compiling the source code...")
-else:
-    logging.info("GCC compiler not found. Skipping compilation.")
-    print("GCC compiler not found. Skipping compilation.")
-
 COMPILE_ARGS = ("-Wall -g -O2 -shared -fPIC"
                 " -flto -fwhole-program -fno-use-linker-plugin"
                 " -o %s %s")
 SSE_FLAGS = "-mfpmath=sse -msse2"
 SOURCE_FILES = [
-    'pyhelper.c', 'serialqueue.c', 'stepcompress.c', 'itersolve.c', 'trapq.c',
-    'pollreactor.c', 'msgblock.c', 'trdispatch.c',
+    'pyhelper.c', 'serialqueue.c', 'stepcompress.c', 'steppersync.c',
+    'itersolve.c', 'trapq.c', 'pollreactor.c', 'msgblock.c', 'trdispatch.c',
     'kin_cartesian.c', 'kin_corexy.c', 'kin_corexz.c', 'kin_delta.c',
     'kin_deltesian.c', 'kin_polar.c', 'kin_rotary_delta.c', 'kin_winch.c',
-    'kin_extruder.c', 'kin_shaper.c', 'serial_485_queue.c', 'msgblock_485.c', 'filament_change.c',
+    'kin_extruder.c', 'kin_shaper.c', 'kin_idex.c', 'kin_generic.c'
+    'serial_485_queue.c', 'msgblock_485.c', 'filament_change.c'
 ]
 DEST_LIB = "c_helper.so"
 OTHER_FILES = [
-    'list.h', 'serialqueue.h', 'stepcompress.h', 'itersolve.h', 'pyhelper.h',
-    'trapq.h', 'pollreactor.h', 'msgblock.h', 'serial_485_queue.h', 'msgblock_485.h',
+    'list.h', 'serialqueue.h', 'stepcompress.h', 'steppersync.h',
+    'itersolve.h', 'pyhelper.h', 'trapq.h', 'pollreactor.h', 'msgblock.h'
+    'serial_485_queue.h', 'msgblock_485.h',
 ]
 
 defs_stepcompress = """
@@ -61,45 +38,57 @@ defs_stepcompress = """
         int step_count, interval, add;
     };
 
-    struct stepcompress *stepcompress_alloc(uint32_t oid);
-    void stepcompress_fill(struct stepcompress *sc, uint32_t max_error
-        , int32_t queue_step_msgtag, int32_t set_next_step_dir_msgtag);
+    void stepcompress_fill(struct stepcompress *sc, uint32_t oid
+        , uint32_t max_error, int32_t queue_step_msgtag
+        , int32_t set_next_step_dir_msgtag);
     void stepcompress_set_invert_sdir(struct stepcompress *sc
         , uint32_t invert_sdir);
-    void stepcompress_free(struct stepcompress *sc);
     int stepcompress_reset(struct stepcompress *sc, uint64_t last_step_clock);
     int stepcompress_set_last_position(struct stepcompress *sc
         , uint64_t clock, int64_t last_position);
     int64_t stepcompress_find_past_position(struct stepcompress *sc
         , uint64_t clock);
-    int stepcompress_queue_msg(struct stepcompress *sc
-        , uint32_t *data, int len);
     int stepcompress_extract_old(struct stepcompress *sc
         , struct pull_history_steps *p, int max
         , uint64_t start_clock, uint64_t end_clock);
+"""
 
-    struct steppersync *steppersync_alloc(struct serialqueue *sq
-        , struct stepcompress **sc_list, int sc_num, int move_num);
-    void steppersync_free(struct steppersync *ss);
+defs_steppersync = """
+    struct stepcompress *syncemitter_get_stepcompress(struct syncemitter *se);
+    void syncemitter_set_stepper_kinematics(struct syncemitter *se
+        , struct stepper_kinematics *sk);
+    struct stepper_kinematics *syncemitter_get_stepper_kinematics(
+        struct syncemitter *se);
+    void syncemitter_queue_msg(struct syncemitter *se, uint64_t req_clock
+        , uint32_t *data, int len);
+    struct syncemitter *steppersync_alloc_syncemitter(struct steppersync *ss
+        , char name[16], int alloc_stepcompress);
+    void steppersync_setup_movequeue(struct steppersync *ss
+        , struct serialqueue *sq, int move_num);
     void steppersync_set_time(struct steppersync *ss
         , double time_offset, double mcu_freq);
-    int steppersync_flush(struct steppersync *ss, uint64_t move_clock);
+    struct steppersyncmgr *steppersyncmgr_alloc(void);
+    void steppersyncmgr_free(struct steppersyncmgr *ssm);
+    struct steppersync *steppersyncmgr_alloc_steppersync(
+        struct steppersyncmgr *ssm);
+    int32_t steppersyncmgr_gen_steps(struct steppersyncmgr *ssm
+        , double flush_time, double gen_steps_time, double clear_history_time);
 """
 
 defs_itersolve = """
-    int32_t itersolve_generate_steps(struct stepper_kinematics *sk
-        , double flush_time);
     double itersolve_check_active(struct stepper_kinematics *sk
         , double flush_time);
     int32_t itersolve_is_active_axis(struct stepper_kinematics *sk, char axis);
-    void itersolve_set_trapq(struct stepper_kinematics *sk, struct trapq *tq);
-    void itersolve_set_stepcompress(struct stepper_kinematics *sk
-        , struct stepcompress *sc, double step_dist);
+    void itersolve_set_trapq(struct stepper_kinematics *sk, struct trapq *tq
+        , double step_dist);
+    struct trapq *itersolve_get_trapq(struct stepper_kinematics *sk);
     double itersolve_calc_position_from_coord(struct stepper_kinematics *sk
         , double x, double y, double z);
     void itersolve_set_position(struct stepper_kinematics *sk
         , double x, double y, double z);
     double itersolve_get_commanded_pos(struct stepper_kinematics *sk);
+    double itersolve_get_gen_steps_pre_active(struct stepper_kinematics *sk);
+    double itersolve_get_gen_steps_post_active(struct stepper_kinematics *sk);
 """
 
 defs_trapq = """
@@ -110,21 +99,15 @@ defs_trapq = """
         double x_r, y_r, z_r;
     };
 
-    typedef struct{
-        double extru_last_position;
-        double next_move_time;
-    }append_return_t;
-
-    append_return_t trapq_append_from_moveq(struct trapq *tq_kinematic, struct trapq *tq_extruder,double next_move_time,unsigned int move_data_h,int move_num);
-
+    struct trapq *trapq_alloc(void);
+    void trapq_free(struct trapq *tq);
     void trapq_append(struct trapq *tq, double print_time
         , double accel_t, double cruise_t, double decel_t
         , double start_pos_x, double start_pos_y, double start_pos_z
         , double axes_r_x, double axes_r_y, double axes_r_z
         , double start_v, double cruise_v, double accel);
-    struct trapq *trapq_alloc(void);
-    void trapq_free(struct trapq *tq);
-    void trapq_finalize_moves(struct trapq *tq, double print_time);
+    void trapq_finalize_moves(struct trapq *tq, double print_time
+        , double clear_history_time);
     void trapq_set_position(struct trapq *tq, double print_time
         , double pos_x, double pos_y, double pos_z);
     int trapq_extract_old(struct trapq *tq, struct pull_move *p, int max
@@ -133,7 +116,12 @@ defs_trapq = """
 
 defs_kin_cartesian = """
     struct stepper_kinematics *cartesian_stepper_alloc(char axis);
-    struct stepper_kinematics *cartesian_reverse_stepper_alloc(char axis);
+"""
+defs_kin_generic_cartesian = """
+    struct stepper_kinematics *generic_cartesian_stepper_alloc(double a_x
+        , double a_y, double a_z);
+    void generic_cartesian_stepper_set_coeffs(struct stepper_kinematics *sk
+        , double a_x, double a_y, double a_z);
 """
 
 defs_kin_corexy = """
@@ -171,18 +159,26 @@ defs_kin_winch = """
 
 defs_kin_extruder = """
     struct stepper_kinematics *extruder_stepper_alloc(void);
+    void extruder_stepper_free(struct stepper_kinematics *sk);
     void extruder_set_pressure_advance(struct stepper_kinematics *sk
-        , double pressure_advance, double smooth_time);
+        , double print_time, double pressure_advance, double smooth_time);
 """
 
 defs_kin_shaper = """
-    double input_shaper_get_step_generation_window(int n, double a[]
-        , double t[]);
     int input_shaper_set_shaper_params(struct stepper_kinematics *sk, char axis
         , int n, double a[], double t[]);
     int input_shaper_set_sk(struct stepper_kinematics *sk
         , struct stepper_kinematics *orig_sk);
+    void input_shaper_update_sk(struct stepper_kinematics *sk);
     struct stepper_kinematics * input_shaper_alloc(void);
+"""
+
+defs_kin_idex = """
+    void dual_carriage_set_sk(struct stepper_kinematics *sk
+        , struct stepper_kinematics *orig_sk);
+    int dual_carriage_set_transform(struct stepper_kinematics *sk
+        , char axis, double scale, double offs);
+    struct stepper_kinematics * dual_carriage_alloc(void);
 """
 
 defs_serialqueue = """
@@ -195,7 +191,7 @@ defs_serialqueue = """
     };
 
     struct serialqueue *serialqueue_alloc(int serial_fd, char serial_fd_type
-        , int client_id);
+        , int client_id, char name[16]);
     void serialqueue_exit(struct serialqueue *sq);
     void serialqueue_free(struct serialqueue *sq);
     struct command_queue *serialqueue_alloc_commandqueue(void);
@@ -231,6 +227,8 @@ defs_trdispatch = """
 
 defs_pyhelper = """
     void set_python_logging_callback(void (*func)(const char *));
+    double get_monotonic(void);
+    int set_thread_name(char name[16]);
 """
 
 defs_std = """
@@ -261,10 +259,12 @@ defs_filament_change = """
 
 defs_all = [
     defs_pyhelper, defs_serialqueue, defs_std, defs_stepcompress,
-    defs_itersolve, defs_trapq, defs_trdispatch,
+    defs_steppersync, defs_itersolve, defs_trapq, defs_trdispatch,
     defs_kin_cartesian, defs_kin_corexy, defs_kin_corexz, defs_kin_delta,
     defs_kin_deltesian, defs_kin_polar, defs_kin_rotary_delta, defs_kin_winch,
-    defs_kin_extruder, defs_kin_shaper, defs_serial_485_queue, defs_filament_change,
+    defs_kin_extruder, defs_kin_shaper, defs_kin_idex,
+    defs_kin_generic_cartesian,
+    defs_serial_485_queue, defs_filament_change,
 ]
 
 # Update filenames to an absolute path
@@ -303,11 +303,33 @@ def do_build_code(cmd):
         logging.error(msg)
         raise Exception(msg)
 
+# Build the main c_helper.so c code library
+def check_build_c_library():
+    srcdir = os.path.dirname(os.path.realpath(__file__))
+    srcfiles = get_abs_files(srcdir, SOURCE_FILES)
+    ofiles = get_abs_files(srcdir, OTHER_FILES)
+    destlib = get_abs_files(srcdir, [DEST_LIB])[0]
+    if not check_build_code(srcfiles+ofiles+[__file__], destlib):
+        # Code already built
+        return destlib
+    # Select command line options
+    if check_gcc_option(SSE_FLAGS):
+        cmd = "%s %s %s" % (GCC_CMD, SSE_FLAGS, COMPILE_ARGS)
+    else:
+        cmd = "%s %s" % (GCC_CMD, COMPILE_ARGS)
+    # Invoke compiler
+    logging.info("Building C code module %s", DEST_LIB)
+    tempdestlib = get_abs_files(srcdir, ["_temp_" + DEST_LIB])[0]
+    do_build_code(cmd % (tempdestlib, ' '.join(srcfiles)))
+    # Rename from temporary file to final file name
+    os.rename(tempdestlib, destlib)
+    return destlib
+
 FFI_main = None
 FFI_lib = None
 pyhelper_logging_callback = None
 
-# Hepler invoked from C errorf() code to log errors
+# Helper invoked from C errorf() code to log errors
 def logging_callback(msg):
     logging.error(FFI_main.string(msg))
 
@@ -315,33 +337,17 @@ def logging_callback(msg):
 def get_ffi():
     global FFI_main, FFI_lib, pyhelper_logging_callback
     if FFI_lib is None:
-        srcdir = os.path.dirname(os.path.realpath(__file__))
-        srcfiles = get_abs_files(srcdir, SOURCE_FILES)
-        ofiles = get_abs_files(srcdir, OTHER_FILES)
-        destlib = get_abs_files(srcdir, [DEST_LIB])[0]
-        ## 没有检测到gcc的平台不执行此步骤
-        if should_compile:
-            ## 编译前先清除旧有的c_helper.so，防止后面加载出错
-            os.system("rm " + destlib)
-            if check_build_code(srcfiles+ofiles+[__file__], destlib):
-                if check_gcc_option(SSE_FLAGS):
-                    cmd = "%s %s %s" % (GCC_CMD, SSE_FLAGS, COMPILE_ARGS)
-                else:
-                    cmd = "%s %s" % (GCC_CMD, COMPILE_ARGS)
-                logging.info("Building C code module %s", DEST_LIB)
-                do_build_code(cmd % (destlib, ' '.join(srcfiles)))
-
-        ## 如果不是gcc，说明使用的交叉编译，不应执行此步骤，是gcc才执行该步骤，
-        ## 在不含gcc平台下，此步骤不受影响，因为GCC_CMD默认为gcc
-        if GCC_CMD == "gcc":
-            FFI_main = cffi.FFI()
-            for d in defs_all:
-                FFI_main.cdef(d)
-            FFI_lib = FFI_main.dlopen(destlib)
-            # Setup error logging
-            pyhelper_logging_callback = FFI_main.callback("void func(const char *)",
-                                                        logging_callback)
-            FFI_lib.set_python_logging_callback(pyhelper_logging_callback)
+        # Check if library needs to be built, and build if so
+        destlib = check_build_c_library()
+        # Open library
+        FFI_main = cffi.FFI()
+        for d in defs_all:
+            FFI_main.cdef(d)
+        FFI_lib = FFI_main.dlopen(destlib)
+        # Setup error logging
+        pyhelper_logging_callback = FFI_main.callback("void func(const char *)",
+                                                      logging_callback)
+        FFI_lib.set_python_logging_callback(pyhelper_logging_callback)
     return FFI_main, FFI_lib
 
 

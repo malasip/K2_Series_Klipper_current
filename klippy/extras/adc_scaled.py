@@ -7,7 +7,6 @@
 SAMPLE_TIME = 0.001
 SAMPLE_COUNT = 8
 REPORT_TIME = 0.300
-RANGE_CHECK_COUNT = 4
 
 class MCU_scaled_adc:
     def __init__(self, main, pin_params):
@@ -18,7 +17,7 @@ class MCU_scaled_adc:
         qname = main.name + ":" + pin_params['pin']
         query_adc.register_adc(qname, self._mcu_adc)
         self._callback = None
-        self.setup_minmax = self._mcu_adc.setup_minmax
+        self.setup_adc_sample = self._mcu_adc.setup_adc_sample
         self.get_mcu = self._mcu_adc.get_mcu
     def _handle_callback(self, read_time, read_value):
         max_adc = self._main.last_vref[1]
@@ -45,7 +44,7 @@ class PrinterADCScaled:
         self.inv_smooth_time = 1. / smooth_time
         self.mcu = self.mcu_vref.get_mcu()
         if self.mcu is not self.mcu_vssa.get_mcu():
-            raise config.error("""{"code":"key188", "msg": "vref and vssa must be on same mcu", "values": []}""")
+            raise config.error("vref and vssa must be on same mcu")
         # Register setup_pin
         ppins = self.printer.lookup_object('pins')
         ppins.register_chip(self.name, self)
@@ -54,14 +53,13 @@ class PrinterADCScaled:
         ppins = self.printer.lookup_object('pins')
         mcu_adc = ppins.setup_pin('adc', pin_name)
         mcu_adc.setup_adc_callback(REPORT_TIME, callback)
-        mcu_adc.setup_minmax(SAMPLE_TIME, SAMPLE_COUNT, minval=0., maxval=1.,
-                             range_check_count=RANGE_CHECK_COUNT)
+        mcu_adc.setup_adc_sample(SAMPLE_TIME, SAMPLE_COUNT)
         query_adc = config.get_printer().load_object(config, 'query_adc')
         query_adc.register_adc(self.name + ":" + name, mcu_adc)
         return mcu_adc
     def setup_pin(self, pin_type, pin_params):
         if pin_type != 'adc':
-            raise self.printer.config_error("""{"code":"key189", "msg": "adc_scaled only supports adc pins", "values": []}""")
+            raise self.printer.config_error("adc_scaled only supports adc pins")
         return MCU_scaled_adc(self, pin_params)
     def calc_smooth(self, read_time, read_value, last):
         last_time, last_value = last

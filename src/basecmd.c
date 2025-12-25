@@ -17,10 +17,6 @@
  * Low level allocation
  ****************************************************************/
 
-static uint32_t allocMoveQueueCountMax = 0;
-static uint32_t usedMoveQueueNumber = 0;
-static uint32_t usedMoveQueueWaterLine = 0;
-
 static void *alloc_end;
 
 void
@@ -54,7 +50,6 @@ alloc_chunks(size_t size, size_t count, uint16_t *avail)
         shutdown("alloc_chunks failed");
     void *data = alloc_chunk(p - alloc_end);
     *avail = can_alloc;
-	allocMoveQueueCountMax = can_alloc;
     return data;
 }
 
@@ -83,7 +78,6 @@ move_free(void *m)
     struct move_node *mf = m;
     mf->next = move_free_list;
     move_free_list = mf;
-	usedMoveQueueNumber--;
 }
 
 // Allocate runtime storage
@@ -95,13 +89,6 @@ move_alloc(void)
     if (!mf)
         shutdown("Move queue overflow");
     move_free_list = mf->next;
-	usedMoveQueueNumber++;
-	
-	if(usedMoveQueueWaterLine < usedMoveQueueNumber)
-	{
-		usedMoveQueueWaterLine = usedMoveQueueNumber;
-	}
-
     irq_restore(flag);
     return mf;
 }
@@ -176,7 +163,6 @@ move_reset(void)
     struct move_node *mf = move_list + (move_count - 1)*move_item_size;
     mf->next = NULL;
     move_free_list = move_list;
-	output("allocMax=%u usedMax=%u",allocMoveQueueCountMax,usedMoveQueueWaterLine);
 }
 DECL_SHUTDOWN(move_reset);
 
@@ -187,7 +173,7 @@ move_finalize(void)
         shutdown("Already finalized");
     struct move_queue_head dummy;
     move_queue_setup(&dummy, sizeof(*move_free_list));
-    move_list = alloc_chunks(move_item_size, 4096, &move_count);
+    move_list = alloc_chunks(move_item_size, 1024, &move_count);
     move_reset();
 }
 
@@ -259,7 +245,7 @@ void
 command_get_config(uint32_t *args)
 {
     sendf("config is_config=%c crc=%u is_shutdown=%c move_count=%hu"
-          , is_finalized(), config_crc, sched_is_shutdown(), move_count - 10);
+          , is_finalized(), config_crc, sched_is_shutdown(), move_count);
 }
 DECL_COMMAND_FLAGS(command_get_config, HF_IN_SHUTDOWN, "get_config");
 
@@ -313,6 +299,13 @@ command_get_uptime(uint32_t *args)
 }
 DECL_COMMAND_FLAGS(command_get_uptime, HF_IN_SHUTDOWN, "get_uptime");
 
+// Similar to timer_is_before(), but handles full 32bit duration
+static int
+timer_has_elapsed(uint32_t start, uint32_t cur, uint32_t duration)
+{
+    return (uint32_t)(cur - start) >= duration;
+}
+
 #define SUMSQ_BASE 256
 DECL_CONSTANT("STATS_SUMSQ_BASE", SUMSQ_BASE);
 
@@ -336,7 +329,7 @@ stats_update(uint32_t start, uint32_t cur)
         nextsumsq = 0xffffffff;
     sumsq = nextsumsq;
 
-    if (timer_is_before(cur, stats_send_time + timer_from_us(5000000)))
+    if (!timer_has_elapsed(stats_send_time, cur, timer_from_us(5000000)))
         return;
     sendf("stats count=%u sum=%u sumsq=%u", count, sum, sumsq);
     if (cur < stats_send_time)

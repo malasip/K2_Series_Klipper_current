@@ -4,6 +4,8 @@
 #
 # This file may be distributed under the terms of the GNU GPLv3 license.
 import logging
+import json
+import os
 
 class GCodeMove:
     def __init__(self, config):
@@ -49,6 +51,7 @@ class GCodeMove:
         self.base_position = [0.0, 0.0, 0.0, 0.0]
         self.last_position = [0.0, 0.0, 0.0, 0.0]
         self.homing_position = [0.0, 0.0, 0.0, 0.0]
+        self.axis_map = {'X':0, 'Y': 1, 'Z': 2, 'E': 3}
         self.speed = 25.
         self.speed_factor = 1. / 60.
         self.extrude_factor = 1.
@@ -109,9 +112,8 @@ class GCodeMove:
             self.position_with_transform = toolhead.get_position
         self.reset_last_position()
     def _handle_shutdown(self):
-        if not self.is_printer_ready:
-            return
         self.is_printer_ready = False
+    def _handle_analyze_shutdown(self, msg, details):
         logging.info("gcode state: absolute_coord=%s absolute_extrude=%s"
                      " base_position=%s last_position=%s homing_position=%s"
                      " speed_factor=%s extrude_factor=%s speed=%s",
@@ -141,7 +143,7 @@ class GCodeMove:
     def _get_gcode_position(self):
         p = [lp - bp for lp, bp in zip(self.last_position, self.base_position)]
         p[3] /= self.extrude_factor
-        return p
+        return p[:4]
     def _get_gcode_speed(self):
         return self.speed / self.speed_factor
     def _get_gcode_speed_override(self):
@@ -154,105 +156,57 @@ class GCodeMove:
             'extrude_factor': self.extrude_factor,
             'absolute_coordinates': self.absolute_coord,
             'absolute_extrude': self.absolute_extrude,
-            'homing_origin': self.Coord(*self.homing_position),
-            'position': self.Coord(*self.last_position),
-            'gcode_position': self.Coord(*move_position),
+            'homing_origin': self.Coord(self.homing_position),
+            'position': self.Coord(self.last_position),
+            'gcode_position': self.Coord(move_position),
+            'axis_map': self.axis_map,
         }
     def reset_last_position(self):
         if self.is_printer_ready:
             self.last_position = self.position_with_transform()
-    def simple_cmd_G1(self, line):
-        cpos = line.find(';')
-        if cpos > 0:
-            line = line[:cpos]
-        parts=line.split()
-        try:
-            for part in parts[1:]:
-                if part[0]=="E" or part[0]=="e":
-                    if not self.absolute_coord or not self.absolute_extrude:
-                        # value relative to position of last move
-                        self.last_position[3] += float(part[1:]) * self.extrude_factor
-                    else:
-                        # value relative to base coordinate position
-                        self.last_position[3] = float(part[1:]) * self.extrude_factor + self.base_position[3]
-                elif part[0]=="X" or part[0]=="x":
-                    if not self.absolute_coord:
-                            # value relative to position of last move
-                        self.last_position[0] += float(part[1:])
-                    else:
-                        # value relative to base coordinate position
-                        self.last_position[0] = float(part[1:]) + self.base_position[0]
-                elif part[0]=="Y" or part[0]=="y":
-                    if not self.absolute_coord:
-                            # value relative to position of last move
-                        self.last_position[1] += float(part[1:])
-                    else:
-                        # value relative to base coordinate position
-                        self.last_position[1] = float(part[1:]) + self.base_position[1]
-                elif part[0]=="Z" or part[0]=="z":
-                    toolhead = self.printer.lookup_object('toolhead')
-                    print_stats = self.printer.lookup_object('print_stats')
-                    max_z = toolhead.kin.limits[2][1]+5
-                    curtime = self.printer.get_reactor().monotonic()
-                    if 'z' in toolhead.get_status(curtime)['homed_axes'] and float(part[1:]) > max_z or (not self.absolute_coord and self.last_position[2]+float(part[1:])>max_z):
-                        m = """{"code":"587","msg":"Move out of range %s", "values":[]}""" % str(part)
-                        self.printer.lookup_object('gcode')._respond_error(m)
-                        if print_stats.state == "printing" and self.printer.lookup_object('pause_resume').pause_start == False and self.printer.lookup_object('virtual_sdcard').is_move_out_of_range_in_printing==False:
-                            self.printer.lookup_object('virtual_sdcard').is_move_out_of_range_in_printing=True
-                        return
-                    if not self.absolute_coord:
-                            # value relative to position of last move
-                        self.last_position[2] += float(part[1:])
-                    else:
-                        # value relative to base coordinate position
-                        self.last_position[2] = float(part[1:]) + self.base_position[2]
-                elif part[0]=="F" or part[0]=="f":
-                    gcode_speed = float(part[1:])
-                    if gcode_speed <= 0.:
-                        raise Exception("""{"code":"key272": "msg":"Invalid speed in '%s'", "values":["%s"]}"""% (line,line))
-                    self.speed =  gcode_speed* self.speed_factor
-        except ValueError as e:
-            raise Exception("""{"code":"key273": "msg":"Unable to parse move '%s'", "values":["%s"]}"""% (line,line))
-        self.move_with_transform(self.last_position, self.speed)
+    def _update_extra_axes(self):
+        toolhead = self.printer.lookup_object('toolhead')
+        axis_map = {'X':0, 'Y': 1, 'Z': 2, 'E': 3}
+        extra_axes = toolhead.get_extra_axes()
+        for index, ea in enumerate(extra_axes):
+            if ea is None:
+                continue
+            gcode_id = ea.get_axis_gcode_id()
+            if (gcode_id is None or len(gcode_id) != 1 or not gcode_id.isupper()
+                or gcode_id in axis_map or gcode_id in "FN"):
+                continue
+            axis_map[gcode_id] = index
+        self.axis_map = axis_map
+        self.base_position[4:] = [0.] * (len(extra_axes) - 4)
+        self.reset_last_position()
     # G-Code movement commands
     def cmd_G1(self, gcmd):
         # Move
         params = gcmd.get_command_parameters()
         try:
-            for pos, axis in enumerate('XYZ'):
+            for axis, pos in self.axis_map.items():
                 if axis in params:
                     v = float(params[axis])
-                    if not self.absolute_coord:
+                    absolute_coord = self.absolute_coord
+                    if axis == 'E':
+                        v *= self.extrude_factor
+                        if not self.absolute_extrude:
+                            absolute_coord = False
+                    if not absolute_coord:
                         # value relative to position of last move
                         self.last_position[pos] += v
                     else:
                         # value relative to base coordinate position
                         self.last_position[pos] = v + self.base_position[pos]
-            if 'Z' in params:
-                print_stats = self.printer.lookup_object('print_stats')
-                if print_stats.state != "printing":
-                    toolhead = self.printer.lookup_object('toolhead')
-                    curtime = self.printer.get_reactor().monotonic()
-                    if 'z' in toolhead.get_status(curtime)['homed_axes'] and self.last_position[2] < -2:
-                        logging.info("Minimum Limit -2 last_position[2]:%s"%self.last_position[2])
-                        self.last_position[2] = -2
-            if 'E' in params:
-                v = float(params['E']) * self.extrude_factor
-                if not self.absolute_coord or not self.absolute_extrude:
-                    # value relative to position of last move
-                    self.last_position[3] += v
-                else:
-                    # value relative to base coordinate position
-                    self.last_position[3] = v + self.base_position[3]
             if 'F' in params:
                 gcode_speed = float(params['F'])
                 if gcode_speed <= 0.:
-                    raise gcmd.error("""{"code":"key272": "msg":"Invalid speed in '%s'", "values":["%s"]}"""
-                                     % (gcmd.get_commandline(),gcmd.get_commandline()))
+                    raise gcmd.error("Invalid speed in '%s'"
+                                     % (gcmd.get_commandline(),))
                 self.speed = gcode_speed * self.speed_factor
         except ValueError as e:
-            raise gcmd.error("""{"code":"key273": "msg":"Unable to parse move '%s'", "values":["%s"]}"""
-                             % (gcmd.get_commandline(),gcmd.get_commandline()))
+            raise gcmd.error("Unable to parse move '%s'"
+                             % (gcmd.get_commandline(),))
         self.move_with_transform(self.last_position, self.speed)
     # G-Code coordinate manipulation
     def cmd_G20(self, gcmd):
@@ -282,7 +236,7 @@ class GCodeMove:
                     offset *= self.extrude_factor
                 self.base_position[i] = self.last_position[i] - offset
         if offsets == [None, None, None, None]:
-            self.base_position = list(self.last_position)
+            self.base_position[:4] = self.last_position[:4]
     def cmd_M114(self, gcmd):
         # Get Current Position
         p = self._get_gcode_position()
@@ -292,7 +246,6 @@ class GCodeMove:
         value = gcmd.get_float('S', 100., above=0.) / (60. * 100.)
         self.speed = self._get_gcode_speed() * value
         self.speed_factor = value
-        import json
         try:
             SAVE = int(gcmd.get('SAVE', 0))
             speed_S = int(gcmd.get_float('S', 100., above=0.))
@@ -315,7 +268,6 @@ class GCodeMove:
         e_value = (last_e_pos - self.base_position[3]) / self.extrude_factor
         self.base_position[3] = last_e_pos - e_value * new_extrude_factor
         self.extrude_factor = new_extrude_factor
-        import json
         try:
             SAVE = int(gcmd.get('SAVE', 0))
             speed_S = int(gcmd.get_float('S', 100., above=0.))
@@ -350,7 +302,6 @@ class GCodeMove:
                 self.last_position[pos] += delta
             self.move_with_transform(self.last_position, speed)
     def recordPrintFileName(self, path, file_name, fan_state={}, filament_used=0, last_print_duration=0, pressure_advance=""):
-        import json, os
         fan = {}
         M204_accel = ""
         old_filament_used = 0
@@ -503,26 +454,6 @@ class GCodeMove:
                 now_pos = toolhead.get_position()
                 logging.info("power_loss cmd_CX_RESTORE_GCODE_STATE after cmd_ZDOWN now_pos:%s"%str(now_pos))
                 adjustments_diff = 0
-#                if self.config.has_section("z_tilt"):
-#                    try:
-#                        z_tilt = self.printer.lookup_object('z_tilt')
-#                        adjustments = z_tilt.get_adjustments()
-#                        logging.info("power_loss cmd_CX_RESTORE_GCODE_STATE z_tilt.get_adjustments:%s" % str(adjustments))
-#                        if adjustments:
-#                            negative = False
-#                            if abs(adjustments[0]) < abs(adjustments[1]):
-#                                if adjustments[1] < 0:
-#                                    negative = True
-#                            else:
-#                                if adjustments[0] < 0:
-#                                    negative = True
-#                            adjustments_diff = abs(adjustments[0]-adjustments[1])/2
-#                            adjustments_diff = adjustments_diff*(-1.0) if negative else adjustments_diff
-#                    except Exception as err:
-#                        logging.exception("RESTORE z_tilt.get_adjustments err:%s" % err)
-#                if adjustments_diff != 0 and abs(adjustments_diff)>4.0:
-#                    logging.info("power_loss cmd_CX_RESTORE_GCODE_STATE adjustments_diff:%s > 3.0" % adjustments_diff)
-#                    adjustments_diff =  adjustments_diff/10
                 cur_z = now_pos[2]+adjustments_diff + offset_value
                 logging.info("power_loss cmd_CX_RESTORE_GCODE_STATE cur_z:%s adjustments_diff:%s" % (cur_z, adjustments_diff))
                 toolhead.set_position([now_pos[0], now_pos[1], cur_z, self.last_position[3]], homing_axes=(2,))
@@ -635,11 +566,11 @@ class GCodeMove:
         state_name = gcmd.get('NAME', 'default')
         state = self.saved_states.get(state_name)
         if state is None:
-            raise gcmd.error("""{"code":"key274", "msg": "Unknown g-code state: %s", "values":["%s"]}""" % (state_name, state_name))
+            raise gcmd.error("Unknown g-code state: %s" % (state_name,))
         # Restore state
         self.absolute_coord = state['absolute_coord']
         self.absolute_extrude = state['absolute_extrude']
-        self.base_position = list(state['base_position'])
+        self.base_position[:4] = state['base_position'][:4]
         self.homing_position = list(state['homing_position'])
         self.speed = state['speed']
         self.speed_factor = state['speed_factor']
@@ -657,7 +588,7 @@ class GCodeMove:
     def cmd_GET_POSITION(self, gcmd):
         toolhead = self.printer.lookup_object('toolhead', None)
         if toolhead is None:
-            raise gcmd.error("""{"code": "key283", "msg": ""Printer not ready"}""")
+            raise gcmd.error("Printer not ready")
         kin = toolhead.get_kinematics()
         steppers = kin.get_steppers()
         mcu_pos = " ".join(["%s:%d" % (s.get_name(), s.get_mcu_position())
@@ -667,7 +598,7 @@ class GCodeMove:
         kinfo = zip("XYZ", kin.calc_position(dict(cinfo)))
         kin_pos = " ".join(["%s:%.6f" % (a, v) for a, v in kinfo])
         toolhead_pos = " ".join(["%s:%.6f" % (a, v) for a, v in zip(
-            "XYZE", toolhead.get_position())])
+            "XYZE", toolhead.get_position()[:4])])
         gcode_pos = " ".join(["%s:%.6f"  % (a, v)
                               for a, v in zip("XYZE", self.last_position)])
         base_pos = " ".join(["%s:%.6f"  % (a, v)
@@ -684,24 +615,5 @@ class GCodeMove:
                           % (mcu_pos, stepper_pos, kin_pos, toolhead_pos,
                              gcode_pos, base_pos, homing_pos))
 
-    cmd_SET_POSITION_help = (
-        "SET_POSITION information on the current location of the toolhead")
-    def cmd_SET_POSITION(self, gcmd):
-        toolhead = self.printer.lookup_object('toolhead', None)
-        if toolhead is None:
-            raise gcmd.error("""{"code": "key283", "msg": ""Printer not ready"}""")
-        position = toolhead.get_position()
-        x = position[0]
-        y = position[1]
-        z = position[2]
-        e = position[3]
-        X = gcmd.get_float('X', x)
-        Y = gcmd.get_float('Y', y)
-        Z = gcmd.get_float('Z', z)
-        E = gcmd.get_float('E', e)
-        toolhead.set_position([X, Y, Z, E], homing_axes=(2,))
-        position = toolhead.get_position()
-        msg = "toolhead get_position X:%s, Y:%s, Z:%s, E:%s" % (position[0], position[1], position[2], position[3])
-        gcmd.respond_info(msg)
 def load_config(config):
     return GCodeMove(config)

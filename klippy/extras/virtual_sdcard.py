@@ -92,7 +92,7 @@ class VirtualSD:
         # Error handling
         gcode_macro = self.printer.load_object(config, 'gcode_macro')
         self.on_error_gcode = gcode_macro.load_template(
-            config, 'on_error_gcode', '')
+            config, 'on_error_gcode', DEFAULT_ERROR_GCODE)
         # Register commands
         self.gcode = self.printer.lookup_object('gcode')
         for cmd in ['M20', 'M21', 'M23', 'M24', 'M25', 'M26', 'M27']:
